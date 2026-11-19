@@ -71,7 +71,7 @@
 
   // ------------------------------------------------------------------ confirm / input box
   // ask({title, text, ok, danger, fields:[{name,label,type,value,max,placeholder}], type:'RESET'}) -> Promise<values object | null>
-  var dlgDone = null, dlgCheck = null;
+  var dlgDone = null, dlgCheck = null, dlgAt = 0;
   function closeDialog(val) {
     var d = dlgDone;
     dlgDone = null; dlgCheck = null;
@@ -95,7 +95,7 @@
         '<button type="submit" class="btn' + (o.danger ? ' hot' : '') + '" id="dlgOk">' + esc(o.ok || 'Yes') + ' <kbd>Enter</kbd></button></div></form>';
       var box = $('dlg');
       box.innerHTML = h; show(box, true);
-      dlgDone = resolve;
+      dlgDone = resolve; dlgAt = Date.now();
       var form = box.querySelector('form'), okBtn = $('dlgOk');
       function values() {
         var out = {}, ins = form.querySelectorAll('input'), i;
@@ -125,7 +125,7 @@
     $('conn').className = 'conn ' + s;
     txt($('connTxt'), s === 'live' ? 'live' : s === 'polling' ? 'slow link' : 'no connection');
     var lost = $('lost');
-    if (s === 'live' || !V) { show(lost, false); return; }
+    if (s === 'live' || !V) { show(lost, false); if (V && V.phase === 'order') fitTicket(); return; }
     txt(lost, s === 'polling'
       ? 'The live link dropped. This screen still updates every few seconds and reconnects by itself.'
       : 'NO CONNECTION to the game laptop. This is the last state we saw. Reconnecting…');
@@ -259,7 +259,7 @@
       h += btn('end', '⏹ End order now', { primary: true, tip: 'Close this order early. Teams that have not handed in get 0 for it.' });
     } else if (p === 'reveal') {
       nx = nextIndex(v);
-      if (nx != null) h += btn('next', '▶ Next: ' + esc(publicLabel(v, nx)), { primary: true, tip: 'Send the next order to every phone and start its clock' });
+      if (nx != null) h += btn('next', '▶ Next: ' + esc(publicLabel(v, nx)), { primary: true, tip: 'Send the next order to every phone and start its clock. You are asked first.' });
       else h += btn('final', '🏁 Show final results', { primary: true, tip: 'End the game and open the podium' });
       h += btn('replay', '↻ Replay best run', { off: !v.spotlight, tip: 'Show the best route of this round again on the map' });
       if (nx != null) h += btn('final', '🏁 Final results', { tip: 'End the game early and open the podium' });
@@ -435,13 +435,13 @@
       h += '<div class="ab"><div><p class="dbl">Order A</p><ul class="items">' + R.a.map(itemLi).join('') + '</ul></div>' +
         '<div><p class="dbl">Order B</p><ul class="items">' + R.b.map(itemLi).join('') + '</ul></div></div>';
     } else {
-      h += '<ul class="items' + (!small && R.items.length > 4 ? ' cols2' : '') + '">' + R.items.map(itemLi).join('') + '</ul>';
+      h += '<ul class="items' + (!small && R.items.length > 5 ? ' cols2' : '') + '">' + R.items.map(itemLi).join('') + '</ul>';
     }
     if (R.mult && R.mult !== 1) h += '<p class="worth">Worth ' + (R.mult === 2 ? 'DOUBLE' : R.mult + ' x') + ' points</p>';
     return h;
   }
   // The whole ticket must always be readable: if it is taller than its place (long order, pause bar or a message on
-  // screen, small window) the letters shrink step by step until the last line fits.
+  // screen, small window) or a product name is cut off, the letters shrink step by step until everything fits.
   var tixSig = '';
   function fitTicket() {
     var tk = $('ticket'), row = tk.parentNode;
@@ -449,11 +449,18 @@
     var sig = tk._h + '|' + row.clientWidth + 'x' + row.clientHeight + '|' + tk.className;
     if (sig === tixSig) return;
     tixSig = sig;
-    var f = 1;
+    var f = 1, names = tk.querySelectorAll('.items li span');
+    function clips() {
+      if (tk.scrollHeight > tk.clientHeight + 1) return true;
+      for (var i = 0; i < names.length; i++) if (names[i].scrollWidth > names[i].clientWidth + 1) return true;      // a product name cut off with "…"
+      return false;
+    }
     tk.style.fontSize = '';
-    while (tk.scrollHeight > tk.clientHeight + 1 && f > 0.55) { f -= 0.05; tk.style.fontSize = f.toFixed(2) + 'em'; }
+    while (f > 0.55 && clips()) { f -= 0.05; tk.style.fontSize = f.toFixed(2) + 'em'; }
   }
   window.addEventListener('resize', function () { if (V && V.phase === 'order') fitTicket(); });
+  // the room for the ticket also changes without a new view (the "no connection" bar comes and goes): fit again then
+  if (window.ResizeObserver) { try { new ResizeObserver(function () { if (V && V.phase === 'order') fitTicket(); }).observe($('ticket').parentNode); } catch (e) {} }
   function renderOrder(v, fresh) {
     var R = v.round;
     if (!R) return;
@@ -925,7 +932,8 @@
       }
       t = t.parentNode;
     }
-    if (d) { ev.preventDefault(); closeDialog(null); return; }
+    // the second click of a double click lands on the dark background: it must not close the box that the first click opened
+    if (d) { ev.preventDefault(); if (Date.now() - dlgAt > 400) closeDialog(null); return; }
     if (act) {
       if (t.disabled || !ACT[act]) return;
       if (t.tagName === 'BUTTON') { ev.preventDefault(); try { t.blur(); } catch (e) {} }
@@ -964,7 +972,14 @@
     }
     // A question box is open: only Enter (yes) and Esc (no) answer it. Space on its buttons does nothing, and N is ignored,
     // so pressing N twice (or N then the pause key) can never confirm by accident.
-    if (dlgDone) { if ((k === ' ' || k === 'Spacebar') && tag === 'BUTTON') ev.preventDefault(); return; }
+    if (dlgDone) {
+      if ((k === ' ' || k === 'Spacebar') && tag === 'BUTTON') ev.preventDefault();
+      // a held Enter key never answers a box: one long press must not open a question and say yes to it
+      else if (k === 'Enter' && ev.repeat) ev.preventDefault();
+      // Enter still means yes when a click on the dark background took the focus out of the box
+      else if (k === 'Enter' && !$('dlg').contains(t)) { ev.preventDefault(); if (!ev.repeat && dlgCheck) dlgCheck(); }
+      return;
+    }
     if (!V || ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (k === ' ' || k === 'Spacebar') {

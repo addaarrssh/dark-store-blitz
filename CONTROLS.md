@@ -35,7 +35,7 @@ Two screens:
 
 Keys do nothing while you are typing in a text field. `N` and `Space` do nothing while a question box is open.
 
-**Careful with `N` on the results screen:** "Next" starts the next order at once, with no question first. On every other
+**`N` always asks first.** "Next", "Start Round 1", "Start Order 1", "Final results" and each podium reveal open a question box ("Start Order 4?"). **Enter** = yes, **Esc** = "Not yet". Pressing `N` again does nothing, so a stray key press cannot start a round. In the lobby, **Show rules** (key `R`) puts the full rules on the projector; it is only available before Round 1 starts.
 screen the yellow button asks before it acts (except "Reveal place" on the podium).
 
 Sounds on the organiser screen only work after one click or key press on the page.
@@ -86,7 +86,7 @@ Sounds on the organiser screen only work after one click or key press on the pag
 
 | Control | What it does | When to use |
 |---|---|---|
-| ▶ Next: Order … `N` | Starts the next order that was not played yet. **No question is asked.** Surprise rounds are shown as "Surprise round" so the hall cannot read the name early. | When the room is ready. |
+| ▶ Next: Order … `N` | Starts the next order that was not played yet. **Asks first** ("Start Order 4?" - Enter = yes, Esc = Not yet). Surprise rounds are shown as "Surprise round" so the hall cannot read the name early. | When the room is ready. |
 | ↻ Replay best run | Plays the best route of this round again on the map. | To explain why that route was good. |
 | 🏁 Final results | Ends the game early and opens the podium. Asks first. | Only if you run out of time. |
 
@@ -155,8 +155,8 @@ running, it is closed first. The buttons are greyed out until the layouts are lo
 - The phone remembers its team. Closing and opening the page brings the team back without typing again.
 
 ### Always on the phone
-- Top bar: connection dot, team name, points (after layouts are locked), **Rules** button, PAUSED sign, clock.
-- **Rules** opens the full rules. Inside it: **Sound: on/off** and **Use another team on this phone**.
+- Top bar: connection dot, team name, points (after layouts are locked), **Rules** button in the lobby / **Help** button from Round 1 on, PAUSED sign, clock.
+- **Rules** (lobby only) opens the full rules with the penalty list. From Round 1 on it becomes **Help**: only how to use the screen, walking and points - no placing rules, no penalties. Inside both: **Sound: on/off** and **Use another team on this phone**.
 - A message from the organiser shows under the top bar. Tap it to hide it.
 - A strip says "Reconnecting… you can keep playing" or "No connection" when the link is bad.
 
@@ -167,7 +167,7 @@ running, it is closed first. The buttons are greyed out until the layouts are lo
 - Tap a shelf square, choose the product, then tap a level (Top, Middle, Bottom). Tapping the level saves it.
 - Choosing a product that is already somewhere else moves it. **Empty this shelf** takes a product off.
 - Tap a product in the list "Your 24 products" to find it or to place it.
-- The phone shows what a choice would cost ("here it would cost −75") and a live list of the penalties the layout would get now. Squares that cost points are marked.
+- The phone does NOT coach: no "would cost" hints, no live penalty list, no warning marks while stocking. Product tags (COLD, CHEMICAL, FRAGILE, HEAVY) and zone colours stay. Penalties are shown only after layouts are locked. The phone also keeps its screen awake during the game (needs https or localhost; over plain http on Wi-Fi the phone may still lock).
 - All teammates can place at the same time. The layout is shared.
 - If the organiser shows sales per hour, each product shows its number.
 
@@ -280,7 +280,7 @@ The clock times come from the game. The talking time between rounds is a suggest
 | Time | Step | What you press |
 |---|---|---|
 | 0:00 | Doors open. Lobby on the projector, teams join. | - |
-| 0:10 | Explain the rules (players have them under **Rules**). | **Lock joining** when everyone is in |
+| 0:10 | Explain the rules (put them on the projector with **Show rules**; phones show them only in the lobby). | **Lock joining** when everyone is in |
 | 0:15 | **Round 1: build your store**, 30 minutes. | **Start Round 1**. Maybe **Show sales per hour**. |
 | 0:45 | Layouts lock by themselves. Talk through the layout check. | (**Reopen layouts for 5 min** if many are unfinished) |
 | 0:48 | **Orders 1 to 10.** 20 minutes of clock in total plus about 1 minute of results each. | **Start Order 1**, then **Next** after each result |
@@ -299,7 +299,7 @@ Short on time? Pick a shorter Round 1 (the list goes down to 5 minutes), or skip
 - Tell the player to refresh the page. The team, the layout and the route being drawn all come back.
 - If the page asks to join again: same team name, same PIN.
 - "Too many wrong PINs" or the PIN is forgotten: Control room → team line → **New PIN**.
-- The phone joined a wrong (new) team by a typo: on the phone, Rules → **Use another team on this phone**, join the right one, then **Remove** the stray team.
+- The phone joined a wrong (new) team by a typo: on the phone, Rules/Help → **Use another team on this phone**, join the right one, then **Remove** the stray team.
 - The 3D replay stutters: nothing to do. The phone switches to the flat map by itself.
 
 **Wi-Fi drops for the room**
