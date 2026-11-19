@@ -156,7 +156,7 @@ h3{font-size:22px}
 
 /* an order is being picked */
 .map-grid .c.dim>*{opacity:.38}
-.map-grid .c.tgt{background:var(--rush);color:#000;animation:kit-tgt .7s infinite alternate;z-index:1}
+.map-grid .c.tgt{background:var(--rush);color:#000;box-shadow:inset 0 0 0 2px var(--ink);z-index:1}
 .map-grid .c.got{background:#fff;color:#000;box-shadow:inset 0 0 0 .22em var(--go),inset 0 0 0 1px var(--ink)}
 .map-grid .c.got .n{text-decoration:line-through}
 .map-grid .c.got .e{opacity:.25;transform:scale(.7)}
