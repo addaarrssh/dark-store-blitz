@@ -1,0 +1,7 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "preview-3d", "runtimeExecutable": "python3", "runtimeArgs": ["-m", "http.server", "3210", "--bind", "127.0.0.1", "--directory", "/Users/adarshsahu/Desktop/dark-store-blitz"], "port": 3210 },
+    { "name": "game", "runtimeExecutable": "node", "runtimeArgs": ["/Users/adarshsahu/Desktop/dark-store-blitz/server.js"], "port": 3001 }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "dark-store-blitz",
+  "version": "1.0.0",
+  "description": "Dark Store Blitz - Real-time Live Warehouse Competition",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

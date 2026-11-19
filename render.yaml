@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: dark-store-blitz
+    env: node
+    plan: free
+    buildCommand: ""
+    startCommand: node server.js
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: TEAMS_PER_ADDRESS
+        value: "0"
