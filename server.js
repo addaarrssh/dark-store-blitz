@@ -47,10 +47,10 @@ function fresh(pin, hostKeys) {
     ri: -1, done: [], msg: null, layoutSecs: LAYOUT_MINUTES * 60, teams: new Map(),
     startedAt: 0,                    // when the running order was opened (ms)
     podium: 0,                       // final results: how many podium places the organiser has revealed so far (0..3)
-    hostPin: pin || String(crypto.randomInt(100000, 1000000)), hostKeys: hostKeys || []
+    hostPin: pin || process.env.HOST_PIN || '123456', hostKeys: hostKeys || []
   };
 }
-let S = fresh(process.env.HOST_PIN);
+let S = fresh(process.env.HOST_PIN || '123456');
 const byKey = new Map();             // team key -> team
 const byName = new Map();            // lower-case team name -> team
 const live = new Map();              // team id -> { streams:Set, g, ok, body }  (things we never save)
@@ -188,7 +188,7 @@ function load() {
   }
 }
 load();
-if (process.env.HOST_PIN) S.hostPin = String(process.env.HOST_PIN);
+S.hostPin = String(process.env.HOST_PIN || '123456');
 reindex();
 saveDirty = true;                    // make sure the organiser PIN is on disk from the first second
 
@@ -884,6 +884,18 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  Organiser PIN:                   ' + S.hostPin);
   console.log('  Players type this on phones:     ' + (urls.join('   or   ') || 'connect this laptop to Wi-Fi, then start again'));
   console.log('\n  To stop the game press Ctrl + C\n');
+
+  // Keep-alive ping loop for Render free tier so it never spins down
+  const pingUrl = process.env.RENDER_EXTERNAL_URL || 'https://dark-store-blitz.onrender.com';
+  if (pingUrl) {
+    const proto = pingUrl.startsWith('https') ? require('https') : require('http');
+    const pingTimer = setInterval(() => {
+      try {
+        proto.get(pingUrl + '/healthz', res => { res.resume(); }).on('error', () => {});
+      } catch (e) {}
+    }, 10 * 60 * 1000);
+    if (pingTimer.unref) pingTimer.unref();
+  }
 });
 
 let stopping = false;
