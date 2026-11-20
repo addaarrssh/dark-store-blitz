@@ -1,6 +1,7 @@
-// DARK STORE BLITZ - the secret part: the orders, the crises and the sales figures.
-// ONLY the server reads this file. It is never sent to a phone, so nobody can peek at upcoming orders.
-// To change the competition, edit this file and restart the server.
+// DARK STORE BLITZ - the PRACTICE orders, crises and sales figures.
+// This file is in the project (and on GitHub), so anybody can read it. Use it for practice and rehearsals only.
+// The real competition orders live in rounds.secret.js (never uploaded) or in the ROUNDS_B64 setting on Render:
+// when one of those is there, the server plays it instead of this file. See orders.js and tools/secret-orders.js.
 'use strict';
 
 const LAYOUT_MINUTES = 30;     // length of Round 1

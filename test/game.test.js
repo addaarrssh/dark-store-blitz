@@ -5,7 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const Game = require(path.join(__dirname, '..', 'game.js'));
-const { LAYOUT_MINUTES, SOLD, ROUNDS } = require(path.join(__dirname, '..', 'rounds.js'));
+const { LAYOUT_MINUTES, SOLD, ROUNDS } = require(path.join(__dirname, '..', 'orders.js')).load().data;   // secret set if present, else rounds.js
 
 // ---------------------------------------------------------------- helpers
 function rng(seed) {                       // small seeded random generator (mulberry32) so failures can be repeated

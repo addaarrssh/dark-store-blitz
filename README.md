@@ -108,3 +108,25 @@ load test runs on the game laptop itself (the laptop is never limited). From ano
 - `POST /api` with a JSON body `{a: '<action>', ...}` does things (join, place a product, hand in a route, start a round).
 - `GET /events?k=<key>` is a live stream. The server pushes a fresh "view" whenever something that screen may see has changed. If the stream fails, the screens fall back to asking every few seconds.
 - `GET /export.csv?k=<organiser key>` is the final table. `GET /healthz` answers `ok`.
+
+## Before a competition (do this the day before, not on the day)
+
+1. **Secret orders and organiser PIN.** `rounds.js` is public, so it is only the practice set. The real orders are in
+   `rounds.secret.js`, which is never uploaded. Edit it if you like, then run `node tools/secret-orders.js`. It checks
+   the orders and writes `render-secrets.txt` with two lines: `HOST_PIN` and `ROUNDS_B64`. Paste both into
+   Render > dark-store-blitz > Environment and save. Saving restarts the server, so never do it during the game.
+2. **Check it.** Open `/host`, sign in with the new PIN, open the Control room. The Safety section must show two ticks:
+   secret orders loaded, PIN not the default.
+3. **Do not push to GitHub and do not change Render settings during the game.** Both restart the server.
+
+## If the server restarts during the game
+
+Render's free plan forgets the save file on a restart, so the server comes back with an empty lobby. The organiser
+screen keeps a safety copy of the whole game in its browser (refreshed every few seconds) for exactly this.
+
+- Keep ONE organiser screen open for the whole game, in the same browser.
+- After a restart that screen asks for the PIN again, then says "The game server restarted" and offers to put the game
+  back. Press **Put the game back**. Teams, layouts, scores and team PINs return; a running clock returns paused.
+- Phones wait by themselves (up to 5 minutes) and carry on after the restore. Nobody has to join again.
+- Extra belt: Control room > Safety > **Download safety copy** after each stage. **Restore from a file** puts it back
+  from any laptop.

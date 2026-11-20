@@ -12,7 +12,7 @@ const path = require('path');
 const vm = require('vm');
 const { spawn } = require('child_process');
 const Game = require('../game.js');
-const { ROUNDS } = require('../rounds.js');
+const { ROUNDS } = require('../orders.js').load().data;      // the same set the server picks (secret if present, else practice)
 
 const ROOT = path.join(__dirname, '..');
 const PORT = 3400 + Math.floor(Math.random() * 400);
@@ -330,4 +330,172 @@ test('after a crash in the middle of an order the clock comes back paused, witho
   assert.ok(hv.teams.length >= 4, 'teams must survive a restart');
   hv = await host({ a: 'hpause' });
   assert.ok(hv.endsAt > Date.now() && hv.pausedLeft === 0, 'Resume must start the clock again');
+});
+
+// ---------------------------------------------------------------- the server lost everything (free cloud host)
+function rawPost(p, text) {
+  return new Promise((resolve, reject) => {
+    const data = Buffer.from(text);
+    const r = http.request({ host: '127.0.0.1', port: PORT, path: p, method: 'POST', agent: false,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length } }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => { let json = null; try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) {} resolve({ status: res.statusCode, json }); });
+    });
+    r.on('error', reject);
+    r.end(data);
+  });
+}
+function firstEvent(key) {            // what the live stream says first to this key
+  return new Promise((resolve, reject) => {
+    const r = http.get({ host: '127.0.0.1', port: PORT, path: '/events?k=' + key, agent: false }, res => {
+      let text = '';
+      res.on('data', c => { text += c; if (/event: (view|gone)/.test(text)) { r.destroy(); resolve(text); } });
+      res.on('end', () => resolve(text));
+    });
+    r.on('error', e => { if (e.code === 'ECONNRESET') return; reject(e); });
+    setTimeout(() => { r.destroy(); resolve('timeout'); }, 4000);
+  });
+}
+
+test('the safety copy is for the organiser only, and never holds the organiser PIN', async () => {
+  assert.strictEqual((await req('GET', '/backup')).status, 403);
+  assert.strictEqual((await req('GET', '/backup?k=' + '0'.repeat(32))).status, 403);
+  assert.strictEqual((await rawPost('/restore?k=' + '0'.repeat(32), '{}')).status, 403);
+  const b = await req('GET', '/backup?k=' + HK);
+  assert.strictEqual(b.status, 200);
+  assert.ok(b.json && b.json.teams && typeof b.json.boot === 'string');
+  assert.ok(b.text.indexOf(PIN) < 0 && b.text.indexOf(HK) < 0 && !('hostPin' in b.json) && !('hostKeys' in b.json));
+  const bad = await rawPost('/restore?k=' + HK, '{"hello":1}');
+  assert.ok(bad.json && bad.json.ok === false, 'something that is not a safety copy must be refused');
+  assert.strictEqual((await host({ a: 'hstate' })).teams.length, Object.keys(b.json.teams).length, 'a refused restore must change nothing');
+});
+
+test('the server restarts EMPTY in the middle of an order: phones wait, the organiser puts the game back, everybody carries on', async () => {
+  const before = await host({ a: 'hstate' });
+  assert.strictEqual(before.phase, 'order');
+  const copy = (await req('GET', '/backup?k=' + HK)).text;
+  const game = JSON.parse(copy), ids = Object.keys(game.teams);
+  const rockets = ids.map(id => game.teams[id]).find(t => t.name === 'Delta');
+  const scored = ids.map(id => game.teams[id]).find(t => Object.keys(t.res).length > 0);
+  assert.ok(rockets && scored);
+  const oldView = await api({ a: 'state', k: scored.key });
+  assert.ok(oldView.ok);
+
+  await stopServer('SIGKILL');
+  for (const f of fs.readdirSync(TMP)) fs.rmSync(path.join(TMP, f), { force: true });     // the cloud host threw the disk away
+  await startServer();
+
+  // the organiser has to sign in again, and sees an empty lobby from a new start
+  assert.ok((await host({ a: 'hstate' })).badPin, 'old organiser logins are gone with the disk');
+  HK = (await api({ a: 'hlogin', hp: PIN })).k;
+  let hv = await host({ a: 'hstate' });
+  assert.ok(hv.phase === 'lobby' && hv.teams.length === 0 && hv.boot !== before.boot);
+
+  // phones of the old game are told to wait: not "your team is gone", which would throw them back to the join screen
+  const held = await api({ a: 'state', k: scored.key });
+  assert.ok(!held.ok && held.hold === true && !held.gone, 'an old phone must be held, not signed out');
+  assert.ok(!/event: gone/.test(await firstEvent(scored.key)), 'the live stream must not say gone either');
+
+  // one impatient phone joins again with its team name and PIN (an empty new team), and a stranger appears too
+  const again = await api({ a: 'join', name: 'Delta', pin: '1234' });
+  assert.ok(again.ok && again.created === true && again.k !== rockets.key);
+  const stranger = await api({ a: 'join', name: 'Stranger', pin: '9999' });
+  assert.ok(stranger.ok);
+
+  const back = await rawPost('/restore?k=' + HK, copy);
+  assert.ok(back.json && back.json.ok, 'restore failed: ' + JSON.stringify(back.json));
+  assert.strictEqual(back.json.teams, ids.length);
+  assert.strictEqual(back.json.paused, true, 'a running clock comes back paused');
+
+  hv = await host({ a: 'hstate' });
+  assert.ok(hv.ok, 'the organiser stays signed in after a restore');
+  assert.strictEqual(hv.phase, 'order');
+  assert.strictEqual(hv.ri, before.ri);
+  assert.ok(hv.endsAt === 0 && hv.pausedLeft > 0 && hv.pausedLeft <= ROUNDS[before.ri].secs * 1000);
+  assert.deepStrictEqual(hv.board, before.board, 'the scoreboard is exactly what it was');
+  assert.deepStrictEqual(hv.done, before.done);
+
+  // old phones carry on with the key they always had
+  const now = await api({ a: 'state', k: scored.key });
+  assert.ok(now.ok && now.team.name === oldView.team.name && now.team.pts === oldView.team.pts);
+  assert.deepStrictEqual(now.team.layout, oldView.team.layout);
+  assert.ok(/event: view/.test(await firstEvent(scored.key)));
+  // the phone that joined again is on its real team, with the layout that team built
+  const re = await api({ a: 'state', k: again.k });
+  assert.ok(re.ok && re.team.name === 'Delta');
+  assert.deepStrictEqual(re.team.layout, (await api({ a: 'state', k: rockets.key })).team.layout);
+  // the stranger was not part of the game that came back
+  assert.ok((await api({ a: 'state', k: stranger.k })).gone);
+  // team PINs came back too
+  assert.ok((await api({ a: 'join', name: 'Delta', pin: '1234' })).created === false);
+
+  // and all of it is on disk again, with the extra key: one more plain restart keeps it
+  await sleep(1600);
+  await stopServer('SIGTERM');
+  await startServer();
+  assert.ok((await api({ a: 'state', k: again.k })).ok, 'the re-joined phone must survive a normal restart');
+  assert.strictEqual((await host({ a: 'hstate' })).teams.length, ids.length);
+});
+
+test('once the organiser starts a new game, phones of an old game are told to join again', async () => {
+  await stopServer('SIGKILL');
+  for (const f of fs.readdirSync(TMP)) fs.rmSync(path.join(TMP, f), { force: true });
+  await startServer();
+  HK = (await api({ a: 'hlogin', hp: PIN })).k;
+  const ghost = 'ab'.repeat(16);
+  assert.ok((await api({ a: 'state', k: ghost })).hold);
+  assert.ok((await host({ a: 'hlayout', secs: 60 })).ok);
+  assert.ok((await api({ a: 'state', k: ghost })).gone);
+  assert.ok(/event: gone/.test(await firstEvent(ghost)));
+});
+
+// ---------------------------------------------------------------- secret orders
+function startWith(env, port) {       // a second server, for a moment. resolves {child, out, code}
+  return new Promise(resolve => {
+    const c = spawn(process.execPath, ['server.js'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+      env: Object.assign({}, process.env, { PORT: String(port), SAVE_FILE: path.join(TMP, 'other-' + port + '.json') }, env) });
+    let out = '', done = false;
+    const fin = code => { if (!done) { done = true; resolve({ child: c, out, code }); } };
+    const seen = d => { out += d; if (/is running/.test(out)) fin(null); };
+    c.stdout.on('data', seen); c.stderr.on('data', seen);
+    c.on('exit', code => fin(code));
+    setTimeout(() => fin('timeout'), 8000);
+  });
+}
+test('secret orders come from outside the project; a broken set stops the server at once', async () => {
+  const Orders = require('../orders.js');
+  const pub = require('../rounds.js');
+  const mine = JSON.parse(JSON.stringify(pub));
+  mine.ROUNDS[0].title = 'Only The Organiser Knows'; mine.ROUNDS[0].items = [24, 23, 22];
+  const port = PORT + 500;
+  const s = await startWith({ ROUNDS_B64: Orders.encode(mine), HOST_PIN: '135790' }, port);
+  try {
+    assert.strictEqual(s.code, null, 'the server did not start:\n' + s.out);
+    const post = body => new Promise((resolve, reject) => {
+      const data = Buffer.from(JSON.stringify(body));
+      const r = http.request({ host: '127.0.0.1', port, path: '/api', method: 'POST', agent: false, headers: { 'Content-Type': 'application/json', 'Content-Length': data.length } }, res => {
+        let t = ''; res.on('data', c => t += c); res.on('end', () => resolve(JSON.parse(t)));
+      });
+      r.on('error', reject); r.end(data);
+    });
+    const k = (await post({ a: 'hlogin', hp: '135790' })).k;
+    const hv = await post({ a: 'hstate', k });
+    assert.strictEqual(hv.rounds[0].title, 'Only The Organiser Knows');
+    assert.deepStrictEqual(hv.safety, { defaultPin: false, orders: 'secret' });
+  } finally { s.child.kill('SIGKILL'); }
+
+  const broken = JSON.parse(JSON.stringify(pub));
+  broken.ROUNDS[3].items = [1, 1, 99];
+  for (const bad of ['this is not base64 json', Orders.encode(broken)]) {
+    const b = await startWith({ ROUNDS_B64: bad }, port + 1);
+    try { assert.strictEqual(b.code, 1, 'a broken secret set must stop the server, not fall back to the public orders:\n' + b.out); }
+    finally { b.child.kill('SIGKILL'); }
+    assert.ok(/cannot start/.test(b.out));
+  }
+  // the checker itself
+  assert.strictEqual(Orders.check(pub), '');
+  const stuck = JSON.parse(JSON.stringify(pub));
+  stuck.ROUNDS[0].blocked = ['B1', 'B2', 'B3', 'B4'];
+  assert.ok(/cannot be delivered|blocked/.test(Orders.check(stuck)), Orders.check(stuck));
 });

@@ -372,6 +372,10 @@ async function main() {
     }
     hv = await host({ a: 'hreset' });
     check(hv.ok && hv.phase === 'lobby' && !hv.teams.length, 'hreset did not give an empty lobby');
+  } else {
+    // An empty lobby: resetting it changes nothing, but it ends the "old phones wait" minutes after an empty start,
+    // so the unknown-key checks below get the plain answer.
+    hv = await host({ a: 'hreset' });
   }
   if (!hv.timer) hv = await host({ a: 'htimer' });
   if (hv.demo) hv = await host({ a: 'hdemo' });
@@ -395,6 +399,8 @@ async function main() {
   check(!r.ok && r.badPin, 'an unknown organiser key was not answered with badPin:true');
   const csvNo = await get('/export.csv?k=nope');
   check(csvNo.status !== 200, 'the results file was given out without the organiser key');
+  const copyNo = await get('/backup?k=nope');
+  check(copyNo.status !== 200, 'the safety copy was given out without the organiser key');
   await new Promise(resolve => {             // an unknown key on the stream must get "gone" and be hung up
     const before = sse.gone;
     const s = new Stream('nope', null, null);

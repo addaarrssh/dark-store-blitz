@@ -136,7 +136,9 @@
   function onView(v) {
     var first = !V;
     V = v;
-    if (first) { show($('wait'), false); show($('login'), false); show($('app'), true); onStatus(status); }
+    if (first) { show($('wait'), false); show($('login'), false); show($('app'), true); onStatus(status); safetyToast(v); }
+    backupDirty = true;
+    offerRestore(v);
     var rid = v.round ? v.round.id : null;
     var changed = v.phase !== prevPhase;
     if (!first && changed) phaseSound(prevPhase, v.phase);
@@ -693,6 +695,7 @@
       sw('joinlock', !!v.joinOpen, 'Joining', v.joinOpen ? 'New teams can join until Round 1 is locked.' : 'No new teams. Teams already in can reconnect.') +
       sw('sales', !!v.showSales, 'Sales per hour', v.showSales ? 'Teams can see how often each product sells.' : 'Hidden from teams.'));
 
+    renderSafety(v);
     txt($('msgNow'), v.msg && v.msg.text ? 'On screens now: “' + v.msg.text + '”' : 'No message on the screens right now.');
     $('msgClear').disabled = !(v.msg && v.msg.text);
     renderTeams(v);
@@ -912,14 +915,156 @@
         })
         .then(function (yes) {
           if (!yes) return;
-          send({ a: 'hreset' }, 'The game was reset. The lobby is empty.').then(function (r) { if (r.ok) { setDrawer(false); seenNames = null; lobbyShown = -1; boardSig = null; shownPts = Object.create(null); spotSig = null; } });
+          send({ a: 'hreset' }, 'The game was reset. The lobby is empty.').then(function (r) { if (r.ok) { backupStore.clear(); setDrawer(false); seenNames = null; lobbyShown = -1; boardSig = null; shownPts = Object.create(null); spotSig = null; } });
         });
     },
+    restorelast: function () {
+      var b = backupStore.get();
+      if (b && b.game) confirmRestore(b.game, b.at, true);
+    },
+    discardcopy: function () {
+      ask({ title: 'Throw the old safety copy away?', text: 'The copy of the earlier game is deleted from this browser. It cannot be put back afterwards.', ok: 'Throw it away', danger: true })
+        .then(function (yes) { if (yes) { backupStore.clear(); backupDirty = true; if (V) renderSafety(V); } });
+    },
+    restorefile: function () { var f = $('restoreFile'); f.value = ''; f.click(); },
     signout: function () {
       ask({ title: 'Sign out of this screen?', text: 'The game keeps running. You need the organiser PIN to come back.', ok: 'Sign out' })
         .then(function (yes) { if (yes) { keyStore.clear(); showLogin(''); } });
     }
   };
+
+  // ------------------------------------------------------------------ safety copy
+  // A free cloud host forgets the whole game when it restarts. So this screen fetches the whole game every few seconds
+  // and keeps it in this browser. If the server comes back empty, the organiser is asked whether to put the copy back.
+  var backupStore = Kit.store('dsb_backup');     // {at, boot, teams, phase, ri, game}
+  var backupDirty = false, backupBusy = false, backupFail = false, backupAt = 0, askedBoot = '';
+  var BACKUP_MS = 8000, BACKUP_OLD = 24 * 3600 * 1000;
+  // true while this browser holds a copy of an earlier game that is worth more than what the server has now
+  function oldCopy(v) {
+    var b = backupStore.get();
+    if (!b || !b.game || !b.boot || !v || !v.boot || b.boot === v.boot) return null;
+    if (v.phase !== 'lobby' || !(b.teams > v.teams.length) || Date.now() - b.at > BACKUP_OLD) return null;
+    return b;
+  }
+  function clockTime(ms) {
+    var d = new Date(ms), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  function whereWas(g) {
+    var names = { lobby: 'in the lobby', layout: 'in Round 1 (building stores)', locked: 'layouts locked', order: 'an order was running', reveal: 'showing an order\'s results', final: 'final results' };
+    return names[g.phase] || g.phase;
+  }
+  function countTeams(g) { var n = 0, k; for (k in (g.teams || {})) if (Object.prototype.hasOwnProperty.call(g.teams, k)) n++; return n; }
+  function backupTick() {
+    if (!conn || !V || !hostKey || backupBusy || !V.teams.length || oldCopy(V)) return;
+    if (!backupDirty && Date.now() - backupAt < 30000) return;       // nothing happened; still refresh now and then for the clock
+    backupBusy = true; backupDirty = false;
+    var x = new XMLHttpRequest(), boot = V.boot;
+    x.open('GET', '/backup?k=' + encodeURIComponent(hostKey), true);
+    x.timeout = 15000;
+    x.onloadend = function () {
+      backupBusy = false;
+      var g = null;
+      if (x.status === 200) { try { g = JSON.parse(x.responseText); } catch (e) { g = null; } }
+      if (!g || !g.teams || g.boot !== boot) { backupDirty = true; return; }
+      var n = countTeams(g);
+      if (!n) return;
+      backupFail = !backupStore.set({ at: Date.now(), boot: g.boot, teams: n, phase: g.phase, ri: g.ri, game: g });
+      if (!backupFail) backupAt = Date.now();
+      if (ui.drawer && V) renderSafety(V);
+    };
+    try { x.send(); } catch (e) { backupBusy = false; }
+  }
+  setInterval(backupTick, BACKUP_MS);
+
+  function doRestore(game) {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/restore?k=' + encodeURIComponent(hostKey), true);
+    x.setRequestHeader('Content-Type', 'application/json');
+    x.timeout = 30000;
+    x.onloadend = function () {
+      var r = null;
+      try { r = JSON.parse(x.responseText); } catch (e) { r = null; }
+      if (!r || !r.ok) { Kit.toast((r && r.err) || 'The game could not be put back. Check the connection and try again.', 'bad'); Kit.sound('error'); return; }
+      var b = backupStore.get();
+      if (b && V) { b.boot = V.boot; backupStore.set(b); }           // it is the running game again: do not offer it twice
+      backupDirty = true; seenNames = null; lobbyShown = -1;
+      Kit.toast('The game is back: ' + many(r.teams, 'team') + '.' + (r.paused ? ' The clock is PAUSED: press Resume when the room is ready.' : ''), 'ok');
+      if (V) renderSafety(V);
+    };
+    try { x.send(JSON.stringify(game)); } catch (e) { Kit.toast('The game could not be put back.', 'bad'); }
+  }
+  function confirmRestore(game, at, restarted) {
+    var n = countTeams(game), now = V ? V.teams.length : 0;
+    return ask({
+      title: restarted ? 'Put the game back?' : 'Replace the game with this file?',
+      text: 'Safety copy from ' + clockTime(at) + ': ' + many(n, 'team') + ', ' + whereWas(game) + '. ' +
+        (now ? 'It REPLACES what is on the server now (' + many(now, 'team') + '). ' : '') +
+        'Layouts, scores and team PINs come back. A running clock comes back paused. Phones reconnect by themselves.',
+      ok: 'Put the game back', cancel: 'Not now', danger: !!now, type: now && !restarted ? 'RESTORE' : ''
+    }).then(function (yes) { if (yes) doRestore(game); return !!yes; });
+  }
+  // called on every view: the server restarted and came back empty, and this browser still has the game
+  function offerRestore(v) {
+    var b = oldCopy(v);
+    if (!b || askedBoot === v.boot) return;
+    askedBoot = v.boot;
+    Kit.sound('error');
+    ask({
+      title: 'The game server restarted',
+      text: 'It came back EMPTY. This screen kept a safety copy from ' + clockTime(b.at) + ': ' + many(b.teams, 'team') + ', ' + whereWas(b.game) + '. ' +
+        'Put the game back? Layouts, scores and team PINs come back, a running clock comes back paused, and phones reconnect by themselves.',
+      ok: 'Put the game back', cancel: 'Not now'
+    }).then(function (yes) {
+      if (yes) doRestore(b.game);
+      else Kit.toast('The safety copy is kept. You find it in the Control room.', 'ok');
+      if (V) renderSafety(V);
+    });
+  }
+  function safetyNotes(v) {
+    var s = v.safety || {}, out = [];
+    if (s.defaultPin) out.push('The organiser PIN is the default one from the public code. Anyone who knows it can open this screen and reset the game. Set HOST_PIN on the server before the competition.');
+    if (s.orders === 'practice') out.push('These are the public PRACTICE orders: anyone can read them on GitHub. Load the secret set (ROUNDS_B64) before the competition.');
+    return out;
+  }
+  function safetyToast(v) {
+    var n = safetyNotes(v).length;
+    if (n && location.protocol === 'https:') Kit.toast('Safety check: ' + many(n, 'warning') + '. Open the Control room.', 'bad');
+  }
+  function renderSafety(v) {
+    var box = $('drSafety');
+    if (!box) return;
+    var h = '', notes = safetyNotes(v), b = backupStore.get(), old = oldCopy(v), k = encodeURIComponent(hostKey);
+    notes.forEach(function (t) { h += '<p class="alert">⚠ ' + esc(t) + '</p>'; });
+    if (!notes.length) h += '<p class="dr-tip">✓ Secret orders are loaded and the organiser PIN is not the default one.</p>';
+    if (old) {
+      h += '<p class="alert">A safety copy of an earlier game is waiting: ' + esc(clockTime(old.at)) + ', ' + esc(many(old.teams, 'team')) + ', ' + esc(whereWas(old.game)) + '. No new copy is made until you decide.</p>' +
+        '<button type="button" class="btn small" data-act="restorelast" title="Bring the teams, layouts and scores of that game back">↩ Put that game back…</button> ' +
+        '<button type="button" class="btn2 small" data-act="discardcopy" title="Delete the old copy and start keeping copies of this game">Throw it away…</button>';
+    } else if (backupFail) {
+      h += '<p class="alert">⚠ This browser could not keep the safety copy (no room left). Use the download button after every round instead.</p>';
+    } else if (b && b.boot === v.boot) {
+      h += '<p class="dr-tip">✓ Safety copy kept in this browser: ' + esc(clockTime(b.at)) + ', ' + esc(many(b.teams, 'team')) + '. Keep this screen open: it is what brings the game back if the server restarts.</p>';
+    } else {
+      h += '<p class="dr-tip">A safety copy is kept in this browser once the first team has joined. Keep this screen open during the game.</p>';
+    }
+    h += '<div class="dr-tools"><a class="btn2 small" href="/backup?dl=1&k=' + k + '" download="dark-store-blitz-safety-copy.json" title="Save the whole game as a file on this laptop">⬇ Download safety copy</a> ' +
+      '<a class="btn2 small" href="/export.csv?k=' + k + '" download="dark-store-blitz-results.csv" title="Save the table as it stands now, for Excel">⬇ Download results (CSV)</a> ' +
+      '<button type="button" class="btn2 small" data-act="restorefile" title="Put a downloaded safety copy back">⬆ Restore from a file…</button></div>';
+    put(box, h);
+  }
+  $('restoreFile').addEventListener('change', function () {
+    var f = this.files && this.files[0];
+    if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () {
+      var g = null;
+      try { g = JSON.parse(String(rd.result)); } catch (e) { g = null; }
+      if (!g || !g.teams || typeof g.phase !== 'string') { Kit.toast('That file is not a safety copy of this game.', 'bad'); return; }
+      confirmRestore(g, Number(g.savedAt) || Date.now(), false);
+    };
+    rd.readAsText(f);
+  });
 
   // ------------------------------------------------------------------ clicks, typing, keys
   document.addEventListener('click', function (ev) {

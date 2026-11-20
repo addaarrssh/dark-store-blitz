@@ -13,7 +13,7 @@
 <!-- 1. organiser PIN -->
 <form id="login" class="login" autocomplete="off" novalidate hidden>
   <h1 class="logo">Dark Store Blitz</h1>
-  <p>Organiser screen. The organiser PIN is printed in the Terminal window on the game laptop.</p>
+  <p>Organiser screen. Type the organiser PIN.</p>
   <p id="loginNote" class="alert" hidden></p>
   <label class="field">Organiser PIN
     <input id="hp" name="hp" inputmode="numeric" autocomplete="off" maxlength="12">
@@ -196,6 +196,12 @@
           </table>
         </div>
         <p class="dr-tip">Click a team to see its penalty reasons and point adjustments.</p>
+      </section>
+
+      <section class="dr-sec">
+        <h3>Safety</h3>
+        <div id="drSafety"></div>
+        <input type="file" id="restoreFile" accept=".json,application/json" hidden>
       </section>
 
       <section class="dr-sec dr-danger">

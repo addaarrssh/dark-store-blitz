@@ -11,13 +11,23 @@
 'use strict';
 const http = require('http'), fs = require('fs'), os = require('os'), path = require('path'), crypto = require('crypto'), vm = require('vm');
 const Game = require('./game.js');
-const { LAYOUT_MINUTES, SOLD, ROUNDS } = require('./rounds.js');
+const Orders = require('./orders.js');
+
+// Which orders are played: the secret competition set if one was given, otherwise the public practice set (see orders.js).
+let ORDERS;
+try { ORDERS = Orders.load(); }
+catch (e) { console.error('\n  The game cannot start: ' + e.message + '\n'); process.exit(1); }
+const { LAYOUT_MINUTES, SOLD, ROUNDS } = ORDERS.data;
+const PIN_IS_DEFAULT = !process.env.HOST_PIN;      // 123456 is written in the public code: fine at home, not in a competition
+const BOOT = crypto.randomBytes(6).toString('hex'); // changes every time the server starts: the organiser screen uses it to notice a restart
 
 const PORT = Number(process.env.PORT) || 3001;
 const SAVE = process.env.SAVE_FILE || path.join(__dirname, 'blitz-save.json');   // safety copy of the game
 
 const MAX_TEAMS = 300;
 const MAX_BODY = 30 * 1024;          // biggest request we read
+const MAX_RESTORE = 8 * 1024 * 1024; // biggest safety copy the organiser can put back
+const GRACE_MS = 5 * 60000;          // after an empty start, phones of the old game are kept waiting this long (see holding())
 const MAX_STREAMS = 5000;            // live streams in total
 const MAX_TEAM_STREAMS = 20;         // live streams for one team (phones + forgotten tabs)
 const MAX_HOST_KEYS = 50;
@@ -59,7 +69,10 @@ const bestCache = new Map();         // "teamId|roundId" -> best possible result
 
 function reindex() {
   byKey.clear(); byName.clear();
-  for (const t of S.teams.values()) { byKey.set(t.key, t); byName.set(t.name.toLowerCase(), t); }
+  for (const t of S.teams.values()) {
+    byKey.set(t.key, t); byName.set(t.name.toLowerCase(), t);
+    for (const k of t.alt || []) if (!byKey.has(k)) byKey.set(k, t);
+  }
 }
 function rt(t) {
   let x = live.get(t.id);
@@ -87,6 +100,13 @@ function snapshot() {
   const teams = {};
   for (const t of S.teams.values()) teams[t.id] = t;
   return JSON.stringify(Object.assign({}, S, { teams, savedAt: Date.now() }));
+}
+// The safety copy the organiser screen keeps (and can put back after a restart). Same as the save file, but without
+// the organiser PIN and logins: those never leave the server.
+function backupBody() {
+  const teams = {};
+  for (const t of S.teams.values()) teams[t.id] = t;
+  return JSON.stringify(Object.assign({}, S, { teams, savedAt: Date.now(), hostPin: undefined, hostKeys: undefined, boot: BOOT, orders: ORDERS.set }));
 }
 let saving = false, lastSaved = 0;
 function saveSoon() {                // at most one write in flight; write a temp file, then swap it in (never a half file)
@@ -142,15 +162,14 @@ function cleanTeam(x) {
   if (Array.isArray(x.adj)) {
     for (const a of x.adj) if (a && Number.isInteger(a.pts)) t.adj.push({ pts: a.pts, why: String(a.why || '').slice(0, 60) });
   }
+  // extra keys: phones that joined again after a restart, before the organiser put the game back (see restore)
+  if (Array.isArray(x.alt)) { const alt = x.alt.filter(k => typeof k === 'string' && /^[0-9a-f]{32}$/.test(k) && k !== t.key).slice(-8); if (alt.length) t.alt = alt; }
   return t;
 }
-function load() {
-  let raw;
-  try { raw = fs.readFileSync(SAVE, 'utf8'); } catch (e) { return; }          // no save yet: a new game
-  try {
-    const d = JSON.parse(raw);
+// Builds a game from a saved one (the save file, or a safety copy from the organiser screen). Throws if it is not a game.
+function revive(d, pin, quiet) {
     if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('not a saved game');
-    const n = fresh(process.env.HOST_PIN || (typeof d.hostPin === 'string' && d.hostPin ? d.hostPin : null));
+    const n = fresh(pin);
     if (['lobby', 'layout', 'locked', 'order', 'reveal', 'final'].includes(d.phase)) n.phase = d.phase;
     n.endsAt = Number(d.endsAt) > 0 ? Number(d.endsAt) : 0;
     n.pausedLeft = Number(d.pausedLeft) > 0 ? Number(d.pausedLeft) : 0;
@@ -159,8 +178,6 @@ function load() {
     n.done = Array.isArray(d.done) ? d.done.filter(x => ROUND_IDS.has(x)) : [];
     n.msg = d.msg && typeof d.msg.text === 'string' && d.msg.text ? { text: d.msg.text.slice(0, 140), at: Number(d.msg.at) || 0 } : null;
     n.layoutSecs = Number(d.layoutSecs) >= 30 && Number(d.layoutSecs) <= 3600 ? Number(d.layoutSecs) : LAYOUT_MINUTES * 60;
-    // organiser logins survive a restart, unless the PIN was changed from outside
-    if (Array.isArray(d.hostKeys) && n.hostPin === d.hostPin) n.hostKeys = d.hostKeys.filter(k => typeof k === 'string' && /^[0-9a-f]{32}$/.test(k)).slice(-MAX_HOST_KEYS);
     if (d.teams && typeof d.teams === 'object') {
       for (const id of Object.keys(d.teams)) {
         const t = cleanTeam(d.teams[id]);
@@ -176,10 +193,21 @@ function load() {
     if (n.timer && n.endsAt && (n.phase === 'layout' || n.phase === 'order')) {
       const then = Number(d.savedAt) > 0 && Number(d.savedAt) <= Date.now() ? Number(d.savedAt) : Date.now();
       n.pausedLeft = Math.max(30000, n.endsAt - then); n.endsAt = 0;
-      console.log('  The clock was running when the server stopped. It is PAUSED now: press Resume on the organiser screen.');
+      if (!quiet) console.log('  The clock was running when the server stopped. It is PAUSED now: press Resume on the organiser screen.');
     }
     if (n.phase !== 'layout' && n.phase !== 'order') { n.endsAt = 0; n.pausedLeft = 0; }
-    S = n; saveDirty = true;
+    return n;
+}
+let coldStart = true;                // true when the server started with no saved game at all
+function load() {
+  let raw;
+  try { raw = fs.readFileSync(SAVE, 'utf8'); } catch (e) { return; }          // no save yet: a new game
+  try {
+    const d = JSON.parse(raw);
+    const n = revive(d, process.env.HOST_PIN || (d && typeof d.hostPin === 'string' && d.hostPin ? d.hostPin : null));
+    // organiser logins survive a restart, unless the PIN was changed from outside
+    if (Array.isArray(d.hostKeys) && n.hostPin === d.hostPin) n.hostKeys = d.hostKeys.filter(k => typeof k === 'string' && /^[0-9a-f]{32}$/.test(k)).slice(-MAX_HOST_KEYS);
+    S = n; saveDirty = true; coldStart = false;
     console.log('  Picked up the saved game (' + S.teams.size + ' teams) from ' + path.basename(SAVE));
   } catch (e) {
     const bad = SAVE + '.corrupt-' + Date.now();
@@ -191,6 +219,38 @@ load();
 S.hostPin = String(process.env.HOST_PIN || '123456');
 reindex();
 saveDirty = true;                    // make sure the organiser PIN is on disk from the first second
+
+// ---------- coming back after the server lost everything ----------
+// On a free cloud host the save file does not survive a restart: the server comes back with an empty lobby. The organiser
+// screen keeps a safety copy in its browser and offers to put it back (restore). Until then, phones of the old game are
+// told to WAIT instead of "your team is gone", so they keep their place and carry on by themselves after the restore.
+let graceUntil = coldStart ? Date.now() + GRACE_MS : 0;
+const holding = () => graceUntil > Date.now();
+const HOLD = JSON.stringify({ ok: false, hold: true, err: 'The game server restarted. Wait a moment: the organiser is bringing the game back.' });
+
+function restore(d) {
+  const n = revive(d, S.hostPin, true);
+  n.hostKeys = S.hostKeys;
+  // A phone that joined again while the game was empty made a new, empty team. Same name and same PIN: it is the same
+  // team, so its new key simply becomes one more key of the team that comes back.
+  const names = new Map();
+  for (const t of n.teams.values()) names.set(t.name.toLowerCase(), t);
+  for (const c of S.teams.values()) {
+    const t = names.get(c.name.toLowerCase());
+    if (!t || t.key === c.key || !samePin(c.pin, t.pin)) continue;
+    t.alt = (t.alt || []).filter(k => k !== c.key).concat(c.key).slice(-8);
+  }
+  // hang up every phone without saying "gone": each one reconnects by itself and finds its team again
+  for (const x of Array.from(live.values())) for (const s of Array.from(x.streams)) dropStream(s, false);
+  S = n; graceUntil = 0;
+  live.clear(); bestCache.clear(); dirtyTeams.clear(); warmJob++; reindex();
+  badTeam.clear(); badName.clear();
+  touchAll();
+  const R = roundNow();
+  if (R) warmBest(R);
+  console.log('  The organiser put a safety copy back: ' + S.teams.size + ' teams, phase "' + S.phase + '".');
+  return { ok: true, teams: S.teams.size, phase: S.phase, paused: S.pausedLeft > 0 };
+}
 
 // ---------- the clock ----------
 function endOrder() {
@@ -352,6 +412,7 @@ function hostBody() {
     showSales: S.showSales, msg: S.msg, ri: S.ri, done: S.done, podium: S.phase === 'final' ? S.podium : 0,
     rounds: ROUNDS.map(r => ({ id: r.id, label: r.label, title: r.title, stage: r.stage })),
     round: R, urls: lanUrls(), sales: SOLD, layoutSecs: S.layoutSecs,
+    boot: BOOT, safety: { defaultPin: PIN_IS_DEFAULT, orders: ORDERS.set },
     teams,
     board: d.rows.map(x => ({ name: x.t.name, pts: x.tot.pts, meters: x.tot.meters, pen: x.tot.pen })),
     stats: { teams: S.teams.size, devices, submitted: d.stats.submitted, perfect: d.stats.perfect },
@@ -390,7 +451,7 @@ function openStream(req, res, key) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'
   });
-  if (!team && !isHost) return res.end('event: gone\ndata: {}\n\n');
+  if (!team && !isHost) return res.end(holding() ? 'retry: 3000\n\n' : 'event: gone\ndata: {}\n\n');
   if (streamCount >= MAX_STREAMS) return res.end('retry: 5000\n\n');
   try { req.socket.setNoDelay(true); req.socket.setTimeout(0); } catch (e) {}
   const s = { res, team, last: null, blocked: false, since: 0, stale: false, dead: false };
@@ -600,7 +661,7 @@ function hostAct(a, b) {
     }
     const secs = Math.min(3600, Math.max(30, Math.round(Number(b.secs)) || LAYOUT_MINUTES * 60));
     S.phase = 'layout'; S.layoutSecs = secs; S.pausedLeft = 0; S.endsAt = S.timer ? now + secs * 1000 : 0;
-    bestCache.clear();
+    bestCache.clear(); graceUntil = 0;                     // a new game is really starting: old phones are told to join again
   } else if (a === 'hlock') {
     if (S.phase !== 'layout') return 'Round 1 is not running.';
     S.phase = 'locked'; S.endsAt = 0; S.pausedLeft = 0; bestCache.clear();
@@ -662,6 +723,7 @@ function hostAct(a, b) {
     const t = teamOf();
     if (!t) return 'That team is not in the game.';
     S.teams.delete(t.id); byKey.delete(t.key); byName.delete(t.name.toLowerCase());
+    for (const k of t.alt || []) if (byKey.get(k) === t) byKey.delete(k);
     closeTeamStreams(t);
     for (const k of Array.from(bestCache.keys())) if (k.startsWith(t.id + '|')) bestCache.delete(k);
   } else if (a === 'hadjust') {
@@ -689,7 +751,7 @@ function hostAct(a, b) {
     for (const t of Array.from(S.teams.values())) closeTeamStreams(t);
     S = fresh(S.hostPin, S.hostKeys);
     live.clear(); bestCache.clear(); dirtyTeams.clear(); warmJob++; reindex();
-    badTeam.clear(); badName.clear();
+    badTeam.clear(); badName.clear(); graceUntil = 0;
   } else return 'Unknown action.';
   touchAll();
 }
@@ -709,7 +771,7 @@ function act(b, who) {
   }
   if (TEAM_ACTIONS.has(a)) {
     const t = k ? byKey.get(k) : null;
-    if (!t) return JSON.stringify({ ok: false, gone: true, err: 'Your team is not in the game any more. Join again.' });
+    if (!t) return holding() ? HOLD : JSON.stringify({ ok: false, gone: true, err: 'Your team is not in the game any more. Join again.' });
     const e = teamAct(a, b, t, who);
     return e ? JSON.stringify(fail(e)) : withNow(playerBody(t));
   }
@@ -814,6 +876,32 @@ function handle(req, res) {
     });
     return;
   }
+  // The organiser puts a safety copy back (after a restart that lost the game). Signed-in organisers only.
+  if (req.method === 'POST' && url === '/restore') {
+    const k = query.get('k') || '';
+    if (!k || !S.hostKeys.includes(k)) { req.resume(); return json(res, 403, JSON.stringify({ ok: false, badPin: true, err: 'Type the organiser PIN again.' })); }
+    const chunks = [];
+    let size = 0, over = false;
+    req.on('data', c => {
+      if (over) return;
+      size += c.length;
+      if (size > MAX_RESTORE) { over = true; chunks.length = 0; json(res, 413, JSON.stringify(fail('That safety copy is too big.'))); req.resume(); }
+      else chunks.push(c);
+    });
+    req.on('error', () => {});
+    req.on('end', () => {
+      if (over) return;
+      let out;
+      try {
+        const d = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null');
+        if (!d || typeof d !== 'object' || !d.teams || typeof d.teams !== 'object' || typeof d.phase !== 'string') throw new Error('not a safety copy');
+        tick();
+        out = restore(d);
+      } catch (e) { out = fail('That file is not a safety copy of this game.'); }
+      json(res, 200, JSON.stringify(out));
+    });
+    return;
+  }
   if (req.method !== 'GET' && req.method !== 'HEAD') return text(res, 405, 'Not allowed', { Allow: 'GET, POST' });
 
   if (url === '/healthz') return text(res, 200, 'ok');
@@ -827,6 +915,15 @@ function handle(req, res) {
     if (!k || !S.hostKeys.includes(k)) return text(res, 403, 'Open the organiser screen and sign in first.');
     res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="dark-store-blitz-results.csv"' });
     return res.end(csv());
+  }
+  if (url === '/backup') {             // the whole game as one file: the organiser screen fetches it every few seconds
+    const k = query.get('k') || '';
+    if (!k || !S.hostKeys.includes(k)) return text(res, 403, 'Open the organiser screen and sign in first.');
+    tick();
+    const head = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
+    if (query.get('dl')) head['Content-Disposition'] = 'attachment; filename="dark-store-blitz-safety-copy.json"';
+    res.writeHead(200, head);
+    return res.end(req.method === 'HEAD' ? undefined : backupBody());
   }
   if (url === '/favicon.ico') { res.writeHead(204, { 'Cache-Control': 'no-store' }); return res.end(); }
   if (has(FILES, url)) {
@@ -881,7 +978,8 @@ server.listen(PORT, '0.0.0.0', () => {
   const urls = lanUrls();
   console.log('\n  DARK STORE BLITZ is running. Keep this window open.\n');
   console.log('  Organiser screen (this laptop):  http://localhost:' + PORT + '/host');
-  console.log('  Organiser PIN:                   ' + S.hostPin);
+  console.log('  Organiser PIN:                   ' + S.hostPin + (PIN_IS_DEFAULT ? '   (the public default: set HOST_PIN before a competition)' : ''));
+  console.log('  Orders:                          ' + (ORDERS.set === 'secret' ? 'the SECRET competition set (' + ORDERS.from + ')' : 'the public PRACTICE set (rounds.js). Not for a competition.'));
   console.log('  Players type this on phones:     ' + (urls.join('   or   ') || 'connect this laptop to Wi-Fi, then start again'));
   console.log('\n  To stop the game press Ctrl + C\n');
 
